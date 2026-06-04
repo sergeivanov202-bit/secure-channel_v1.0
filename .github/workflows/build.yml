@@ -1,0 +1,174 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Тип сборки'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - client_only
+          - server_only
+
+env:
+  PYTHON_VERSION: "3.11"
+  PYINSTALLER_VERSION: "6.0"
+
+jobs:
+  build-client:
+    name: Сборка клиента (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Клонирование репозитория
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Установка Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - name: Установка зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller>=${{ env.PYINSTALLER_VERSION }}
+          pip install -r requirements.txt
+      - name: Сборка Client EXE
+        if: github.event.inputs.build_type != 'server_only'
+        run: |
+          cd src
+          pyinstaller `
+            --clean `
+            --windowed `
+            --onefile `
+            --name "SecureChannel_Client" `
+            --hidden-import psutil `
+            --hidden-import OpenSSL `
+            --hidden-import cryptography `
+            --hidden-import _cffi_backend `
+            --add-data "../assets;assets" `
+            --icon=NONE `
+            --noconfirm `
+            client_gui.py
+      - name: Проверка артефакта клиента
+        if: github.event.inputs.build_type != 'server_only'
+        run: |
+          if (Test-Path "src/dist/SecureChannel_Client.exe") {
+            $size = (Get-Item "src/dist/SecureChannel_Client.exe").Length / 1MB
+            Write-Output "Клиент собран успешно: $([math]::Round($size, 2)) МБ"
+          } else {
+            Write-Error "Файл клиента не найден!"
+            exit 1
+          }
+      - name: Загрузка артефакта клиента
+        if: github.event.inputs.build_type != 'server_only'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SecureChannel_Client
+          path: src/dist/SecureChannel_Client.exe
+          retention-days: 30
+
+  build-server:
+    name: Сборка сервера (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Клонирование репозитория
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Установка Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - name: Установка зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller>=${{ env.PYINSTALLER_VERSION }}
+          pip install -r requirements.txt
+      - name: Сборка Server EXE
+        if: github.event.inputs.build_type != 'client_only'
+        run: |
+          cd src
+          pyinstaller `
+            --clean `
+            --windowed `
+            --onefile `
+            --name "SecureChannel_Server" `
+            --hidden-import psutil `
+            --hidden-import OpenSSL `
+            --hidden-import cryptography `
+            --hidden-import _cffi_backend `
+            --add-data "../assets;assets" `
+            --icon=NONE `
+            --noconfirm `
+            server_gui.py
+      - name: Проверка артефакта сервера
+        if: github.event.inputs.build_type != 'client_only'
+        run: |
+          if (Test-Path "src/dist/SecureChannel_Server.exe") {
+            $size = (Get-Item "src/dist/SecureChannel_Server.exe").Length / 1MB
+            Write-Output "Сервер собран успешно: $([math]::Round($size, 2)) МБ"
+          } else {
+            Write-Error "Файл сервера не найден!"
+            exit 1
+          }
+      - name: Загрузка артефакта сервера
+        if: github.event.inputs.build_type != 'client_only'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SecureChannel_Server
+          path: src/dist/SecureChannel_Server.exe
+          retention-days: 30
+
+  release:
+    name: Создание релиза
+    needs: [build-client, build-server]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Скачивание артефактов
+        uses: actions/download-artifact@v4
+        with:
+          path: ./release/
+          merge-multiple: true
+      - name: Подготовка описания релиза
+        run: |
+          echo "RELEASE_BODY<<EOF" >> $GITHUB_ENV
+          echo "## Сборка СПО Защищённый канал (mTLS + Zero Trust)" >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          echo "**Версия:** ${{ github.ref_name }}" >> $GITHUB_ENV
+          echo "**Дата:** $(date -u +'%Y-%m-%d %H:%M UTC')" >> $GITHUB_ENV
+          echo "**Коммит:** ${{ github.sha }}" >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          echo "### Состав:" >> $GITHUB_ENV
+          echo "- SecureChannel_Client.exe — клиентское приложение" >> $GITHUB_ENV
+          echo "- SecureChannel_Server.exe — сервер политики" >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          echo "### Системные требования:" >> $GITHUB_ENV
+          echo "- Windows 10/11 (64-bit)" >> $GITHUB_ENV
+          echo "- Для TUN-режима: wintun.dll (скачать с https://www.wintun.net)" >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          echo "### Быстрый старт:" >> $GITHUB_ENV
+          echo "1. Создайте папку certs/ рядом с .exe" >> $GITHUB_ENV
+          echo "2. (Опционально) Положите wintun.dll рядом с .exe" >> $GITHUB_ENV
+          echo "3. Запустите сервер → клиент" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+      - name: Создание GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./release/*.exe
+          body: ${{ env.RELEASE_BODY }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
